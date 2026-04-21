@@ -1,0 +1,16 @@
+.env
+.env.local
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Runtime state that IS committed back across GitHub Actions runs:
+#   - data/state.json        (dedup hashes + last-run timestamp)
+#   - data/digest/*.jsonl    (watch-tier items accumulated through the day)
+# Everything else in data/ is local-only for debugging.
+data/outputs/
+data/*.db
+data/*.sqlite*
+*.log

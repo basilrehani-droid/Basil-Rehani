@@ -1,0 +1,38 @@
+{
+  "description": "Fallback watchlist used when no portfolio.json is provided. Organized by the signal-layer thesis the ticker expresses. Edit freely.",
+  "last_updated": "2026-04",
+  "buckets": {
+    "energy_complex": {
+      "thesis": "Direct exposure to oil price, refining margins, and geopolitical supply shocks.",
+      "tickers": ["XOM", "CVX", "MPC", "VLO", "PSX", "COP", "SLB", "USO", "XLE"]
+    },
+    "rate_sensitive_duration": {
+      "thesis": "Beneficiaries of falling real rates and weaker dollar; suffer on hawkish surprises.",
+      "tickers": ["TLT", "IEF", "PLD", "EQIX", "SPG", "AMT", "DHI", "LEN", "XHB"]
+    },
+    "broad_macro_proxies": {
+      "thesis": "Capture the top-level risk-on / risk-off regime.",
+      "tickers": ["SPY", "QQQ", "IWM", "ACWX", "EEM", "DXY"]
+    },
+    "credit_risk_signals": {
+      "thesis": "Credit-layer risk-appetite gauges; divergence from equity is the signal.",
+      "tickers": ["HYG", "JNK", "LQD", "EMB"]
+    },
+    "defensive_rotation": {
+      "thesis": "Outperform when macro regime turns defensive.",
+      "tickers": ["XLP", "XLV", "XLU", "GLD", "IAU"]
+    },
+    "semiconductors_and_ai": {
+      "thesis": "High beta to AI capex cycle and China-export-restriction headlines.",
+      "tickers": ["NVDA", "AMD", "TSM", "AMAT", "LRCX", "KLAC", "ASML", "SMCI"]
+    },
+    "travel_and_reopening": {
+      "thesis": "Sensitive to consumer health, oil price, and travel demand narrative.",
+      "tickers": ["UAL", "DAL", "LUV", "NCLH", "CCL", "BKNG", "MAR"]
+    },
+    "agriculture_and_fertilizer": {
+      "thesis": "Food/fertilizer supply chain exposure; sensitive to sanctions, weather, trade policy.",
+      "tickers": ["MOS", "CF", "NTR", "ADM", "DE"]
+    }
+  }
+}

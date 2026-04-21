@@ -1,0 +1,72 @@
+{
+  "description": "Example portfolio file. Copy and adapt. The `thesis` field is read by the skill for Layer 2 override detection. Phrases like 'legal risk', 'credit stress', 'accounting', 'regulatory investigation', or 'accumulating risk' will trigger override gating on bullish news.",
+  "as_of": "2026-04-21",
+  "positions": [
+    {
+      "ticker": "MPC",
+      "position_usd": 18000,
+      "cost_basis": 145.20,
+      "thesis": "Refining margin capture; Hormuz reopening is the regime pivot — trim into strength"
+    },
+    {
+      "ticker": "MOS",
+      "position_usd": 9500,
+      "cost_basis": 28.40,
+      "thesis": "Fertilizer supply chain hedge; regional conflict premium"
+    },
+    {
+      "ticker": "SMCI",
+      "position_usd": 7200,
+      "cost_basis": 38.50,
+      "thesis": "Partial trim completed; accumulating legal risk on remaining shares — trim further into strength"
+    },
+    {
+      "ticker": "MSFT",
+      "position_usd": 22000,
+      "cost_basis": 460.00,
+      "thesis": "Underwater long-term hold; AI capex cycle exposure; no near-term catalyst"
+    },
+    {
+      "ticker": "VEEV",
+      "position_usd": 0,
+      "cost_basis": null,
+      "thesis": "Watchlist — strong fundamental thesis but Layer 3 DEX is 71.7% bearish, wait for cleaner entry"
+    },
+    {
+      "ticker": "UAL",
+      "position_usd": 11500,
+      "cost_basis": 89.40,
+      "thesis": "Holding into earnings; support mapped $88-92; binary catalyst"
+    },
+    {
+      "ticker": "NCLH",
+      "position_usd": 6400,
+      "cost_basis": 19.80,
+      "thesis": "Cruise demand cycle; oil-reopening tailwind"
+    },
+    {
+      "ticker": "PLD",
+      "position_usd": 0,
+      "cost_basis": null,
+      "thesis": "Radar — rate-cut and dollar-weakness beneficiary in post-Hormuz regime"
+    },
+    {
+      "ticker": "EQIX",
+      "position_usd": 0,
+      "cost_basis": null,
+      "thesis": "Radar — data center REIT; rate-cut beneficiary"
+    },
+    {
+      "ticker": "DHI",
+      "position_usd": 0,
+      "cost_basis": null,
+      "thesis": "Radar — homebuilder; rate-cut beneficiary"
+    },
+    {
+      "ticker": "ACWX",
+      "position_usd": 0,
+      "cost_basis": null,
+      "thesis": "Radar — ex-US equity; dollar-weakness beneficiary"
+    }
+  ]
+}

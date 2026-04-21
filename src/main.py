@@ -1,0 +1,199 @@
+"""Entry point for the Layer-0 news triage service.
+
+Run modes:
+    python -m src.main triage       # Default: fetch, reason, route notifications
+    python -m src.main digest       # Send the daily email digest (run once per day)
+    python -m src.main test         # Sanity-check config and connections without calling Claude
+
+Designed to be idempotent and safe to re-run: dedup store prevents double-processing,
+and failures in one source never block the others.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import sys
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+from typing import Any, Dict, List
+
+from .config import RSS_FEEDS, load_config
+from .dedupe import content_hash
+from .notifiers import email_digest, telegram
+from .reasoning import triage_batch
+from .router import split_by_tier
+from .sources import gdelt, polygon, rss
+from .state import load_state, save_state
+
+LOG = logging.getLogger(__name__)
+NY_TZ = ZoneInfo("America/New_York")
+
+
+def _setup_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+
+def _is_market_hours() -> bool:
+    """Rough check: NYSE hours ± 90min. We include pre-market (7am) through
+    post-close (5pm) ET, weekdays only. Holidays are NOT checked — an extra call on
+    a holiday costs pennies and doesn't hurt."""
+    now_ny = datetime.now(NY_TZ)
+    if now_ny.weekday() >= 5:  # Saturday=5, Sunday=6
+        return False
+    minutes = now_ny.hour * 60 + now_ny.minute
+    return 7 * 60 <= minutes <= 17 * 60
+
+
+def _fetch_all_sources(polygon_key: str) -> List[Dict[str, Any]]:
+    """Pull from every configured source. One source failing doesn't block others."""
+    items: List[Dict[str, Any]] = []
+
+    for fetch_name, fetch_fn in [
+        ("GDELT", lambda: gdelt.fetch_gdelt()),
+        ("Polygon", lambda: polygon.fetch_polygon(polygon_key)),
+        ("RSS", lambda: rss.fetch_rss(RSS_FEEDS)),
+    ]:
+        try:
+            items.extend(fetch_fn())
+        except Exception as e:
+            LOG.error("%s source blew up unexpectedly: %s", fetch_name, e)
+    return items
+
+
+def _dedupe_against_state(items: List[Dict[str, Any]], state) -> List[Dict[str, Any]]:
+    """Filter out items we've already seen. Mark new ones as seen."""
+    fresh = []
+    for item in items:
+        h = content_hash(item.get("title", ""), item.get("body", ""))
+        if state.has_seen(h):
+            continue
+        fresh.append(item)
+        state.mark_seen(h)
+    return fresh
+
+
+def cmd_triage() -> int:
+    _setup_logging()
+    cfg = load_config()
+
+    if cfg.market_hours_only and not _is_market_hours():
+        LOG.info("Outside market hours; exiting without work")
+        return 0
+
+    state = load_state()
+
+    # 1. Fetch
+    raw_items = _fetch_all_sources(cfg.polygon_api_key)
+    LOG.info("Fetched %d raw items across sources", len(raw_items))
+
+    # 2. Dedupe
+    fresh_items = _dedupe_against_state(raw_items, state)
+    LOG.info("%d fresh items after dedup", len(fresh_items))
+
+    if not fresh_items:
+        state.stamp_run()
+        save_state(state)
+        return 0
+
+    # 3. Reason
+    triage = triage_batch(fresh_items, cfg.anthropic_api_key, cfg.claude_model)
+    if triage is None:
+        LOG.error("Triage returned no result; aborting this run without saving state")
+        return 1
+
+    # 4. Route
+    push_items, digest_items = split_by_tier(
+        triage, cfg.relevance_push_threshold, cfg.relevance_digest_min
+    )
+    LOG.info(
+        "Triage complete: %d push, %d digest, %d noise",
+        len(push_items), len(digest_items), len(triage.get("noise_items", []))
+    )
+
+    # 5. Notify
+    if push_items:
+        telegram.send_alert(cfg.telegram_bot_token, cfg.telegram_chat_id, push_items)
+    if digest_items:
+        email_digest.append_to_digest(digest_items)
+
+    # 6. Persist state (dedup store + last run)
+    state.stamp_run()
+    save_state(state)
+
+    # Also save the full triage output for later review
+    _save_run_output(triage)
+
+    return 0
+
+
+def cmd_digest() -> int:
+    _setup_logging()
+    cfg = load_config()
+    ok = email_digest.build_and_send_digest(
+        cfg.smtp_host, cfg.smtp_port, cfg.smtp_user, cfg.smtp_password, cfg.digest_to_email
+    )
+    return 0 if ok else 1
+
+
+def cmd_test() -> int:
+    """Sanity check: verify config loads, sources are reachable, Telegram can send.
+    Does NOT call Claude (to avoid cost during debugging)."""
+    _setup_logging()
+    try:
+        cfg = load_config()
+    except Exception as e:
+        print(f"FAIL: config: {e}")
+        return 1
+
+    print(f"OK: config loaded (model={cfg.claude_model})")
+
+    # Test sources
+    gdelt_items = gdelt.fetch_gdelt(maxrecords=5)
+    print(f"OK: GDELT returned {len(gdelt_items)} items")
+
+    poly_items = polygon.fetch_polygon(cfg.polygon_api_key, limit=5)
+    print(f"OK: Polygon returned {len(poly_items)} items (empty if no API key)")
+
+    rss_items = rss.fetch_rss(RSS_FEEDS, lookback_minutes=24 * 60)
+    print(f"OK: RSS returned {len(rss_items)} items")
+
+    # Test Telegram — send a hello if credentials present
+    if cfg.telegram_bot_token and cfg.telegram_chat_id:
+        fake = [{
+            "headline": "Test alert — Layer-0 triage is alive",
+            "relevance_score": 9,
+            "directional_bias": "neutral",
+            "affected_tickers": [],
+            "sizing_recommendation": {"stance": "stand_down", "overrides": []},
+        }]
+        ok = telegram.send_alert(cfg.telegram_bot_token, cfg.telegram_chat_id, fake)
+        print(f"{'OK' if ok else 'FAIL'}: Telegram test message")
+
+    print("\nAll checks complete. If everything above is OK, you're ready to run `python -m src.main triage`.")
+    return 0
+
+
+def _save_run_output(triage: Dict[str, Any]) -> None:
+    """Save the full triage output to data/outputs/ for retrospective review."""
+    from .config import DATA_DIR
+    out_dir = DATA_DIR / "outputs"
+    out_dir.mkdir(exist_ok=True)
+    fname = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + ".json"
+    (out_dir / fname).write_text(json.dumps(triage, indent=2))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Layer-0 news triage service")
+    parser.add_argument("command", choices=["triage", "digest", "test"])
+    args = parser.parse_args()
+
+    return {"triage": cmd_triage, "digest": cmd_digest, "test": cmd_test}[args.command]()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

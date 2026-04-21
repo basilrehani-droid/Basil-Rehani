@@ -1,0 +1,62 @@
+name: Triage
+
+on:
+  schedule:
+    # Every 15 minutes during the window that covers US market hours across both
+    # EST and EDT. Python's _is_market_hours() does the fine-grained check.
+    # 11:00 UTC = 7am EDT / 6am EST. 22:00 UTC = 6pm EDT / 5pm EST.
+    - cron: "*/15 11-22 * * 1-5"
+  workflow_dispatch:  # Allow manual trigger from the Actions UI
+
+permissions:
+  contents: write  # Required to commit state.json back
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run triage
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CLAUDE_MODEL: claude-sonnet-4-6
+          RELEVANCE_PUSH_THRESHOLD: "7"
+          RELEVANCE_DIGEST_MIN: "4"
+          MARKET_HOURS_ONLY: "true"
+        run: python -m src.main triage
+
+      - name: Commit state back
+        # Always runs so dedup + digest accumulation persist across runs.
+        # Only makes a commit if something actually changed.
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/state.json data/digest/ 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No state changes to commit"
+          else
+            git commit -m "state: $(date -u +%Y-%m-%dT%H:%MZ) [skip ci]"
+            # Retry push in case of race with another run
+            for i in 1 2 3; do
+              if git pull --rebase origin "$GITHUB_REF_NAME" && git push; then
+                exit 0
+              fi
+              sleep 5
+            done
+            echo "::warning::Failed to push state after 3 retries — state will be regenerated next run"
+          fi
