@@ -2,10 +2,7 @@ name: Triage
 
 on:
   schedule:
-    # Every 15 minutes during the window that covers US market hours across both
-    # EST and EDT. Python's _is_market_hours() does the fine-grained check.
-    # 11:00 UTC = 7am EDT / 6am EST. 22:00 UTC = 6pm EDT / 5pm EST.
-    - cron: "*/15 11-22 * * 1-5"
+    - cron: "*/15 * * * *"
   workflow_dispatch:  # Allow manual trigger from the Actions UI
 
 permissions:
@@ -36,7 +33,7 @@ jobs:
           CLAUDE_MODEL: claude-sonnet-4-6
           RELEVANCE_PUSH_THRESHOLD: "7"
           RELEVANCE_DIGEST_MIN: "4"
-          MARKET_HOURS_ONLY: "true"
+          MARKET_HOURS_ONLY: "false"
         run: python -m src.main triage
 
       - name: Commit state back
