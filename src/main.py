@@ -101,7 +101,14 @@ def cmd_triage() -> int:
         return 0
 
     # 3. Reason
-    triage = triage_batch(fresh_items, cfg.anthropic_api_key, cfg.claude_model)
+    triage = triage_batch(
+        fresh_items,
+        cfg.anthropic_api_key,
+        cfg.claude_model,
+        cfg.schwab_client_id,
+        cfg.schwab_client_secret,
+        cfg.schwab_refresh_token,
+    )
     if triage is None:
         LOG.error("Triage returned no result; aborting this run without saving state")
         return 1

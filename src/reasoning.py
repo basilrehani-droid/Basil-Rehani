@@ -45,18 +45,26 @@ def _load_skill_bundle() -> str:
     return "\n".join(parts)
 
 
-def _load_portfolio() -> str:
-    """Load portfolio_example.json as the default portfolio. Replace this file with
-    your real portfolio (same structure) to personalize the triage."""
+def _load_portfolio(schwab_client_id: str = "", schwab_client_secret: str = "", schwab_refresh_token: str = "") -> str:
+    """Return portfolio JSON string. Uses live Schwab positions if credentials are set,
+    otherwise falls back to portfolio_example.json."""
+    if schwab_client_id and schwab_client_secret and schwab_refresh_token:
+        from .sources.schwab import fetch_portfolio
+        live = fetch_portfolio(schwab_client_id, schwab_client_secret, schwab_refresh_token)
+        if live:
+            import json as _json
+            return _json.dumps(live, indent=2)
+        LOG.warning("Schwab fetch failed; falling back to portfolio_example.json")
+
     pf = SKILL_DIR / "assets" / "portfolio_example.json"
     if not pf.exists():
         return ""
     return pf.read_text()
 
 
-def _build_system_prompt() -> List[Dict[str, Any]]:
+def _build_system_prompt(schwab_client_id: str = "", schwab_client_secret: str = "", schwab_refresh_token: str = "") -> List[Dict[str, Any]]:
     skill_blob = _load_skill_bundle()
-    portfolio_blob = _load_portfolio()
+    portfolio_blob = _load_portfolio(schwab_client_id, schwab_client_secret, schwab_refresh_token)
 
     system_parts = [
         {
@@ -85,6 +93,9 @@ def triage_batch(
     batch: List[Dict[str, Any]],
     api_key: str,
     model: str,
+    schwab_client_id: str = "",
+    schwab_client_secret: str = "",
+    schwab_refresh_token: str = "",
 ) -> Optional[Dict[str, Any]]:
     """Send a batch of news items through the skill. Returns parsed JSON or None on failure."""
     if not batch:
@@ -107,7 +118,7 @@ def triage_batch(
     kwargs = {
         "model": model,
         "max_tokens": MAX_OUTPUT_TOKENS,
-        "system": _build_system_prompt(),
+        "system": _build_system_prompt(schwab_client_id, schwab_client_secret, schwab_refresh_token),
         "messages": [{"role": "user", "content": user_content}],
     }
 

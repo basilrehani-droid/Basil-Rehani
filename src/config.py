@@ -35,6 +35,11 @@ class Config:
     smtp_password: str
     digest_to_email: str
 
+    # Schwab
+    schwab_client_id: str
+    schwab_client_secret: str
+    schwab_refresh_token: str
+
     # Thresholds
     relevance_push_threshold: int
     relevance_digest_min: int
@@ -62,6 +67,9 @@ def load_config() -> Config:
         smtp_user=opt("SMTP_USER"),
         smtp_password=opt("SMTP_PASSWORD"),
         digest_to_email=opt("DIGEST_TO_EMAIL"),
+        schwab_client_id=opt("SCHWAB_CLIENT_ID"),
+        schwab_client_secret=opt("SCHWAB_CLIENT_SECRET"),
+        schwab_refresh_token=opt("SCHWAB_REFRESH_TOKEN"),
         relevance_push_threshold=int(opt("RELEVANCE_PUSH_THRESHOLD", "7")),
         relevance_digest_min=int(opt("RELEVANCE_DIGEST_MIN", "4")),
         market_hours_only=opt("MARKET_HOURS_ONLY", "true").lower() == "true",
