@@ -1,0 +1,11 @@
+{
+  "description": "Ticker -> thesis notes, merged into LIVE Schwab positions for Layer 2 override detection. Schwab's API carries no thesis text, so it comes from here. Phrases like 'legal risk', 'credit stress', 'accounting', 'regulatory investigation', or 'accumulating risk' trigger override gating on bullish news. Edit freely; tickers you don't hold are harmless.",
+  "theses": {
+    "MPC": "Refining margin capture; Hormuz reopening is the regime pivot — trim into strength",
+    "MOS": "Fertilizer supply chain hedge; regional conflict premium",
+    "SMCI": "Partial trim completed; accumulating legal risk on remaining shares — trim further into strength",
+    "MSFT": "Underwater long-term hold; AI capex cycle exposure; no near-term catalyst",
+    "UAL": "Holding into earnings; support mapped $88-92; binary catalyst",
+    "NCLH": "Cruise demand cycle; oil-reopening tailwind"
+  }
+}
