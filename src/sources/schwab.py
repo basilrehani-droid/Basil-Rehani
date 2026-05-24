@@ -5,12 +5,17 @@ Auth flow:
   2. Store SCHWAB_CLIENT_ID, SCHWAB_CLIENT_SECRET, SCHWAB_REFRESH_TOKEN as secrets
   3. Each run: exchange refresh token for access token, fetch positions
 
+Thesis notes (which drive Layer 2 override gating) are merged in from
+skill/assets/thesis_overrides.json, since Schwab's API carries no thesis text.
+
 If credentials are missing, returns None and the caller falls back to portfolio_example.json.
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -19,6 +24,20 @@ LOG = logging.getLogger(__name__)
 
 TOKEN_URL = "https://api.schwabapi.com/v1/oauth/token"
 ACCOUNTS_URL = "https://api.schwabapi.com/trader/v1/accounts"
+
+# Thesis text lives here, not in Schwab — see _load_theses().
+THESIS_FILE = Path(__file__).resolve().parents[2] / "skill" / "assets" / "thesis_overrides.json"
+
+
+def _load_theses() -> Dict[str, str]:
+    """Map ticker -> thesis from thesis_overrides.json. Drives Layer 2 override gating,
+    which Schwab can't supply. Missing/malformed file just means no thesis text."""
+    try:
+        data = json.loads(THESIS_FILE.read_text())
+        return {str(k).upper(): str(v) for k, v in data.get("theses", {}).items()}
+    except (OSError, ValueError) as e:
+        LOG.warning("Could not load thesis overrides (%s); positions will have empty thesis", e)
+        return {}
 
 
 def _refresh_access_token(client_id: str, client_secret: str, refresh_token: str) -> Optional[str]:
@@ -51,7 +70,9 @@ def _fetch_accounts(access_token: str) -> List[Dict[str, Any]]:
 
 
 def _to_portfolio_json(accounts: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Convert Schwab account positions into the portfolio JSON format the skill expects."""
+    """Convert Schwab account positions into the portfolio JSON format the skill expects.
+    Thesis text is merged in from thesis_overrides.json (Schwab carries no thesis)."""
+    theses = _load_theses()
     positions = []
     for account in accounts:
         for pos in account.get("securitiesAccount", {}).get("positions", []):
@@ -76,7 +97,7 @@ def _to_portfolio_json(accounts: List[Dict[str, Any]]) -> Dict[str, Any]:
                 "ticker": ticker,
                 "position_usd": round(market_value, 2),
                 "cost_basis": round(avg_price, 2) if avg_price is not None else None,
-                "thesis": "",
+                "thesis": theses.get(ticker.upper(), ""),
             })
 
     return {

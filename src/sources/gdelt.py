@@ -17,18 +17,18 @@ GDELT_ENDPOINT = "https://api.gdeltproject.org/api/v2/doc/doc"
 DEFAULT_TIMEOUT = 15
 
 
-def fetch_gdelt(query: str = GDELT_QUERY, maxrecords: int = 40) -> List[Dict[str, Any]]:
+def fetch_gdelt(query: str = GDELT_QUERY, maxrecords: int = 40, timespan: str = "30min") -> List[Dict[str, Any]]:
     """Fetch recent articles matching the query. Returns items in the canonical format
     our reasoning layer expects: {id, title, source, url, timestamp, body}.
 
-    GDELT's 'timespan=15min' returns articles processed in the last 15 minutes, which
-    matches our polling cadence."""
+    `timespan` controls how far back GDELT looks (e.g. "30min" for the 15-min triage
+    cadence, "18h" for the overnight window the morning brief needs)."""
     params = {
         "query": query,
         "mode": "artlist",
         "format": "json",
         "maxrecords": maxrecords,
-        "timespan": "30min",  # Slight overlap with the 15-min cadence to avoid gaps
+        "timespan": timespan,
         "sort": "datedesc",
     }
 

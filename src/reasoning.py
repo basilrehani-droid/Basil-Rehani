@@ -135,7 +135,11 @@ def triage_batch(
         LOG.error("Claude API error: %s", e)
         return None
 
-    # Log cache performance — helpful when tuning
+    _log_usage(resp)  # cache performance — helpful when tuning
+    return _parse_json_response(resp)
+
+
+def _log_usage(resp: Any) -> None:
     usage = getattr(resp, "usage", None)
     if usage:
         LOG.info(
@@ -146,16 +150,16 @@ def triage_batch(
             getattr(usage, "output_tokens", 0),
         )
 
-    # Extract text content
+
+def _parse_json_response(resp: Any) -> Optional[Dict[str, Any]]:
+    """Extract text from a Claude response, strip any markdown fences, parse JSON."""
     text = ""
     for block in resp.content:
         if getattr(block, "type", "") == "text":
             text += block.text
 
-    # Strip markdown fences if Claude got chatty
     text = text.strip()
     if text.startswith("```"):
-        # Strip first fence line and the closing fence
         lines = text.split("\n")
         if lines[0].startswith("```"):
             lines = lines[1:]
@@ -168,3 +172,88 @@ def triage_batch(
     except json.JSONDecodeError as e:
         LOG.error("Failed to parse Claude response as JSON: %s\nFirst 500 chars: %s", e, text[:500])
         return None
+
+
+# ── Morning brief ───────────────────────────────────────────────────────────
+
+BRIEF_INSTRUCTIONS = """You are the user's morning market analyst. Using the four-layer \
+framework in the <skill> block as your reasoning discipline, write a single daily \
+pre-market briefing from the overnight news batch and the user's live portfolio.
+
+Be specific and mechanistic — name the causal chain, not just the event. Skip filler. \
+If a section has nothing genuinely market-relevant, return an empty string for it rather \
+than padding. Reference concrete headlines. Where a held position has a clear stance \
+implication under the doctrine (probe / full / reduce / stand_down), say so, and honor \
+Layer 2 thesis overrides (a `thesis` flag like "legal risk" or "accumulating risk" gates \
+bullish news to stand_down).
+
+Output a SINGLE JSON object — no markdown fences, no preamble — with exactly these keys:
+
+{
+  "as_of": "YYYY-MM-DD",
+  "headline_takeaways": ["3-6 one-line bullets: the must-knows before the open"],
+  "market_overview": "Markdown. Overnight/pre-market tape: futures tone, big overnight moves, rates/dollar/oil, what's driving today's session.",
+  "policy_politics": "Markdown. Policy & politics that moves markets: White House / Trump comments, executive orders, new rules, tariffs, foreign policy, Fed/SEC. For each, state the market mechanism and likely affected sectors/tickers.",
+  "portfolio": "Markdown. Per HELD ticker that has relevant news today: the news, the read, and stance implication. Mark thesis-override gating where it fires. Only include held names with something to say.",
+  "radar": "Markdown. SINGLE-NAME CATALYSTS worth a look today, held or not — go beyond macro. Hunt for: FDA approvals / decisions / PDUFA outcomes, government contracts or policy backing (e.g. a federal order or program lifting a name or a whole theme), M&A and activist stakes, earnings results and guidance changes, analyst rating/price-target moves, executive changes, legal/regulatory rulings, and THEMATIC SYMPATHY moves (when one headline lifts a whole cohort — e.g. quantum names ripping on a government-backing story, nuclear/uranium on a policy push). One bullet per name: **TICKER** — the catalyst, the mechanism, and (when the news supports it) the expectation/likelihood and what to watch next. Be specific; if it's just 'stock moved', skip it.",
+  "also_relevant": "Markdown. Anything else you judge relevant today that didn't fit above. Empty string if nothing."
+}
+
+Use GitHub-flavored markdown inside the string fields (headings with **bold**, bullet lists, \
+[links](url) when a source URL is available). Keep the whole brief tight enough to read over coffee."""
+
+
+def _build_brief_system_prompt(
+    schwab_client_id: str = "", schwab_client_secret: str = "", schwab_refresh_token: str = ""
+) -> List[Dict[str, Any]]:
+    skill_blob = _load_skill_bundle()
+    portfolio_blob = _load_portfolio(schwab_client_id, schwab_client_secret, schwab_refresh_token)
+
+    system_parts = [
+        {
+            "type": "text",
+            "text": f"{BRIEF_INSTRUCTIONS}\n\n<skill>\n{skill_blob}\n</skill>",
+            "cache_control": {"type": "ephemeral"},
+        },
+    ]
+    if portfolio_blob:
+        system_parts.append({
+            "type": "text",
+            "text": f"<portfolio>\n{portfolio_blob}\n</portfolio>",
+        })
+    return system_parts
+
+
+def generate_morning_brief(
+    items: List[Dict[str, Any]],
+    api_key: str,
+    model: str,
+    schwab_client_id: str = "",
+    schwab_client_secret: str = "",
+    schwab_refresh_token: str = "",
+) -> Optional[Dict[str, Any]]:
+    """Produce a daily morning brief dict from the overnight news batch and live portfolio.
+    Returns parsed JSON (section fields) or None on failure."""
+    client = anthropic.Anthropic(api_key=api_key)
+
+    user_content = (
+        "Write today's morning brief from this overnight news batch. "
+        "Emit only the JSON object defined in your instructions.\n\n"
+        f"```json\n{json.dumps({'batch': items}, indent=2)}\n```"
+    )
+
+    try:
+        resp = client.messages.create(
+            model=model,
+            max_tokens=MAX_OUTPUT_TOKENS,
+            system=_build_brief_system_prompt(
+                schwab_client_id, schwab_client_secret, schwab_refresh_token
+            ),
+            messages=[{"role": "user", "content": user_content}],
+        )
+    except anthropic.APIError as e:
+        LOG.error("Claude API error (brief): %s", e)
+        return None
+
+    _log_usage(resp)
+    return _parse_json_response(resp)

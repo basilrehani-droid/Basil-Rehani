@@ -1,7 +1,8 @@
 """Entry point for the Layer-0 news triage service.
 
 Run modes:
-    python -m src.main triage       # Default: fetch, reason, route notifications
+    python -m src.main triage       # Default: fetch, reason, route notifications (every 15 min)
+    python -m src.main brief        # Generate + email the morning market brief (once each AM)
     python -m src.main digest       # Send the daily email digest (run once per day)
     python -m src.main test         # Sanity-check config and connections without calling Claude
 
@@ -18,12 +19,12 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, List
 
-from .config import RSS_FEEDS, load_config
+from .config import BRIEF_GDELT_QUERY, CATALYST_FEEDS, COMPANY_NAMES, POLICY_FEEDS, RSS_FEEDS, load_config
 from .dedupe import content_hash
-from .notifiers import email_digest, telegram
-from .reasoning import triage_batch
+from .notifiers import email_brief, email_digest, telegram
+from .reasoning import generate_morning_brief, triage_batch
 from .router import split_by_tier
-from .sources import gdelt, polygon, rss
+from .sources import gdelt, polygon, rss, ticker_news
 from .state import load_state, save_state
 
 LOG = logging.getLogger(__name__)
@@ -138,6 +139,100 @@ def cmd_triage() -> int:
     return 0
 
 
+def _held_tickers(cfg) -> List[str]:
+    """Tickers held in the live Schwab portfolio, for per-stock news. Empty if Schwab
+    isn't configured or the fetch fails — the brief still runs on broad feeds."""
+    if not (cfg.schwab_client_id and cfg.schwab_client_secret and cfg.schwab_refresh_token):
+        return []
+    from .sources.schwab import fetch_portfolio
+    pf = fetch_portfolio(cfg.schwab_client_id, cfg.schwab_client_secret, cfg.schwab_refresh_token)
+    if not pf:
+        return []
+    return [p["ticker"] for p in pf.get("positions", []) if p.get("ticker")]
+
+
+def _fetch_brief_sources(polygon_key: str, held_tickers: List[str]) -> List[Dict[str, Any]]:
+    """Wide overnight sweep for the morning brief: ~18h window, broad policy/markets
+    coverage plus single-name catalysts (FDA) and per-holding ticker news.
+    One source failing doesn't block the others."""
+    items: List[Dict[str, Any]] = []
+    lookback = 18 * 60  # minutes
+
+    for fetch_name, fetch_fn in [
+        ("GDELT-brief", lambda: gdelt.fetch_gdelt(query=BRIEF_GDELT_QUERY, maxrecords=80, timespan="18h")),
+        ("Polygon", lambda: polygon.fetch_polygon(polygon_key, lookback_minutes=lookback, limit=100)),
+        ("RSS-markets", lambda: rss.fetch_rss(RSS_FEEDS, lookback_minutes=lookback)),
+        ("RSS-policy", lambda: rss.fetch_rss(POLICY_FEEDS, lookback_minutes=lookback)),
+        ("RSS-catalyst", lambda: rss.fetch_rss(CATALYST_FEEDS, lookback_minutes=lookback)),
+        ("Ticker-news", lambda: ticker_news.fetch_ticker_news(held_tickers, names=COMPANY_NAMES, lookback_minutes=lookback)),
+    ]:
+        try:
+            items.extend(fetch_fn())
+        except Exception as e:
+            LOG.error("%s source blew up unexpectedly: %s", fetch_name, e)
+    return items
+
+
+def cmd_brief() -> int:
+    """Generate and email the daily morning brief. Run once each weekday morning."""
+    _setup_logging()
+    cfg = load_config()
+
+    held = _held_tickers(cfg)
+    LOG.info("Brief: tracking %d held tickers for per-stock news: %s", len(held), ", ".join(held) or "(none)")
+
+    raw_items = _fetch_brief_sources(cfg.polygon_api_key, held)
+    LOG.info("Brief: fetched %d raw items across sources", len(raw_items))
+
+    # Dedupe within the batch by content hash (no cross-run state — the brief is a
+    # fresh daily synthesis, not an incremental feed).
+    seen, items = set(), []
+    for item in raw_items:
+        h = content_hash(item.get("title", ""), item.get("body", ""))
+        if h in seen:
+            continue
+        seen.add(h)
+        items.append(item)
+    LOG.info("Brief: %d unique items after dedup", len(items))
+
+    if not items:
+        LOG.warning("Brief: no news items fetched; skipping email")
+        return 0
+
+    brief = generate_morning_brief(
+        items,
+        cfg.anthropic_api_key,
+        cfg.brief_model,
+        cfg.schwab_client_id,
+        cfg.schwab_client_secret,
+        cfg.schwab_refresh_token,
+    )
+    if brief is None:
+        LOG.error("Brief generation failed; nothing sent")
+        return 1
+
+    ok = email_brief.send_brief(
+        brief, cfg.smtp_host, cfg.smtp_port, cfg.smtp_user, cfg.smtp_password, cfg.digest_to_email
+    )
+    return 0 if ok else 1
+
+
+def cmd_test_email() -> int:
+    """Send a one-off test email to verify SMTP delivery, independent of Claude/the brief."""
+    _setup_logging()
+    cfg = load_config()
+    LOG.info(
+        "Sending test email via %s:%d as %s -> %s",
+        cfg.smtp_host, cfg.smtp_port, cfg.smtp_user or "(unset)", cfg.digest_to_email or "(unset)",
+    )
+    ok = email_brief.send_test_email(
+        cfg.smtp_host, cfg.smtp_port, cfg.smtp_user, cfg.smtp_password, cfg.digest_to_email
+    )
+    print("OK: test email sent — check your inbox (and spam)." if ok
+          else "FAIL: test email not sent — see the error above.")
+    return 0 if ok else 1
+
+
 def cmd_digest() -> int:
     _setup_logging()
     cfg = load_config()
@@ -196,10 +291,16 @@ def _save_run_output(triage: Dict[str, Any]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Layer-0 news triage service")
-    parser.add_argument("command", choices=["triage", "digest", "test"])
+    parser.add_argument("command", choices=["triage", "brief", "digest", "test", "test-email"])
     args = parser.parse_args()
 
-    return {"triage": cmd_triage, "digest": cmd_digest, "test": cmd_test}[args.command]()
+    return {
+        "triage": cmd_triage,
+        "brief": cmd_brief,
+        "digest": cmd_digest,
+        "test": cmd_test,
+        "test-email": cmd_test_email,
+    }[args.command]()
 
 
 if __name__ == "__main__":
