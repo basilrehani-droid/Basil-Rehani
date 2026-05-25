@@ -10,8 +10,10 @@ venv/
 # Runtime state that IS committed back across GitHub Actions runs:
 #   - data/state.json        (dedup hashes + last-run timestamp)
 #   - data/digest/*.jsonl    (watch-tier items accumulated through the day)
+#   - data/brief_seen.json   (cross-day brief dedup — content hashes only)
 # Everything else in data/ is local-only for debugging.
 data/outputs/
+data/briefs/
 data/*.db
 data/*.sqlite*
 *.log

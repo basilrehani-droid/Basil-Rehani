@@ -19,12 +19,16 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, List
 
-from .config import BRIEF_GDELT_QUERY, CATALYST_FEEDS, COMPANY_NAMES, POLICY_FEEDS, RSS_FEEDS, load_config
+from . import brief_state
+from .config import (
+    BRIEF_GDELT_QUERY, CATALYST_FEEDS, COMPANY_NAMES, MARKET_HOLIDAYS,
+    POLICY_FEEDS, RSS_FEEDS, load_config,
+)
 from .dedupe import content_hash
 from .notifiers import email_brief, email_digest, telegram
-from .reasoning import generate_morning_brief, triage_batch
+from .reasoning import generate_eod_wrap, generate_morning_brief, triage_batch
 from .router import split_by_tier
-from .sources import gdelt, polygon, rss, ticker_news
+from .sources import gdelt, market_data, polygon, rss, ticker_news
 from .state import load_state, save_state
 
 LOG = logging.getLogger(__name__)
@@ -139,16 +143,57 @@ def cmd_triage() -> int:
     return 0
 
 
-def _held_tickers(cfg) -> List[str]:
-    """Tickers held in the live Schwab portfolio, for per-stock news. Empty if Schwab
-    isn't configured or the fetch fails — the brief still runs on broad feeds."""
-    if not (cfg.schwab_client_id and cfg.schwab_client_secret and cfg.schwab_refresh_token):
-        return []
-    from .sources.schwab import fetch_portfolio
-    pf = fetch_portfolio(cfg.schwab_client_id, cfg.schwab_client_secret, cfg.schwab_refresh_token)
-    if not pf:
-        return []
-    return [p["ticker"] for p in pf.get("positions", []) if p.get("ticker")]
+def _today_et() -> str:
+    """Authoritative current date in US/Eastern (markets' timezone)."""
+    return datetime.now(NY_TZ).strftime("%Y-%m-%d")
+
+
+def _briefs_dir():
+    from .config import DATA_DIR
+    d = DATA_DIR / "briefs"
+    d.mkdir(exist_ok=True)
+    return d
+
+
+def _save_brief(brief: Dict[str, Any]) -> None:
+    (_briefs_dir() / f"{brief['as_of']}.json").write_text(json.dumps(brief, indent=2))
+
+
+def _load_brief(date: str) -> Dict[str, Any] | None:
+    path = _briefs_dir() / f"{date}.json"
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def _fetch_brief_portfolio(cfg) -> Dict[str, Any]:
+    """Live Schwab portfolio for the brief, or the example fallback. Fetched once
+    here and threaded through (tickers, cost basis, and the reasoning prompt) so we
+    don't hit Schwab multiple times per run."""
+    if cfg.schwab_client_id and cfg.schwab_client_secret and cfg.schwab_refresh_token:
+        from .sources.schwab import fetch_portfolio
+        pf = fetch_portfolio(cfg.schwab_client_id, cfg.schwab_client_secret, cfg.schwab_refresh_token)
+        if pf:
+            return pf
+        LOG.warning("Brief: Schwab fetch failed; using example portfolio")
+    from .config import SKILL_DIR
+    example = SKILL_DIR / "assets" / "portfolio_example.json"
+    return json.loads(example.read_text()) if example.exists() else {"positions": []}
+
+
+def _holdings_market(portfolio: Dict[str, Any], quotes: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Per-holding price action joined with cost basis: overnight move + distance from basis."""
+    rows = []
+    for pos in portfolio.get("positions", []):
+        t = (pos.get("ticker") or "").upper()
+        q = quotes.get(t)
+        if not t or not q:
+            continue
+        row = {"ticker": t, "price": q["price"], "pct": q["pct"], "session": q["session"]}
+        basis = pos.get("cost_basis")
+        if basis:
+            row["cost_basis"] = basis
+            row["pct_from_basis"] = round((q["price"] - basis) / basis * 100, 1)
+        rows.append(row)
+    return rows
 
 
 def _fetch_brief_sources(polygon_key: str, held_tickers: List[str]) -> List[Dict[str, Any]]:
@@ -178,14 +223,24 @@ def cmd_brief() -> int:
     _setup_logging()
     cfg = load_config()
 
-    held = _held_tickers(cfg)
+    portfolio = _fetch_brief_portfolio(cfg)
+    held = [p["ticker"] for p in portfolio.get("positions", []) if p.get("ticker")]
     LOG.info("Brief: tracking %d held tickers for per-stock news: %s", len(held), ", ".join(held) or "(none)")
+
+    # Real market data, so the brief reasons about actual levels, not headline inference.
+    market = {
+        "macro": market_data.fetch_macro_snapshot(),
+        "holdings": _holdings_market(portfolio, market_data.fetch_quotes(held)),
+    }
+    holiday = MARKET_HOLIDAYS.get(_today_et())
+    if holiday:
+        market["note"] = f"US markets closed today — {holiday}."
+        LOG.info("Brief: %s", market["note"])
 
     raw_items = _fetch_brief_sources(cfg.polygon_api_key, held)
     LOG.info("Brief: fetched %d raw items across sources", len(raw_items))
 
-    # Dedupe within the batch by content hash (no cross-run state — the brief is a
-    # fresh daily synthesis, not an incremental feed).
+    # Dedupe within the batch, then drop anything already covered in recent briefs.
     seen, items = set(), []
     for item in raw_items:
         h = content_hash(item.get("title", ""), item.get("body", ""))
@@ -193,26 +248,83 @@ def cmd_brief() -> int:
             continue
         seen.add(h)
         items.append(item)
-    LOG.info("Brief: %d unique items after dedup", len(items))
+    items = brief_state.filter_unseen(items)
+    LOG.info("Brief: %d items after within-batch + cross-day dedup", len(items))
 
     if not items:
-        LOG.warning("Brief: no news items fetched; skipping email")
+        LOG.warning("Brief: no fresh news items; skipping email")
         return 0
 
     brief = generate_morning_brief(
         items,
         cfg.anthropic_api_key,
         cfg.brief_model,
-        cfg.schwab_client_id,
-        cfg.schwab_client_secret,
-        cfg.schwab_refresh_token,
+        portfolio_json=json.dumps(portfolio, indent=2),
+        market_data=market,
     )
     if brief is None:
         LOG.error("Brief generation failed; nothing sent")
         return 1
 
+    brief["as_of"] = _today_et()  # authoritative date, not model-guessed
+    _save_brief(brief)  # persist so the evening wrap can reconcile against it
+
     ok = email_brief.send_brief(
-        brief, cfg.smtp_host, cfg.smtp_port, cfg.smtp_user, cfg.smtp_password, cfg.digest_to_email
+        brief, cfg.smtp_host, cfg.smtp_port, cfg.smtp_user, cfg.smtp_password,
+        cfg.digest_to_email, market=market,
+    )
+    if ok:
+        brief_state.mark_seen(items)  # only remember items once the brief actually sent
+    return 0 if ok else 1
+
+
+def cmd_eod() -> int:
+    """Generate and email the evening wrap. Run once each weekday after the close."""
+    _setup_logging()
+    cfg = load_config()
+
+    portfolio = _fetch_brief_portfolio(cfg)
+    held = [p["ticker"] for p in portfolio.get("positions", []) if p.get("ticker")]
+
+    market = {
+        "macro": market_data.fetch_macro_snapshot(),
+        "holdings": _holdings_market(portfolio, market_data.fetch_quotes(held)),
+    }
+    holiday = MARKET_HOLIDAYS.get(_today_et())
+    if holiday:
+        market["note"] = f"US markets closed today — {holiday}."
+
+    # The day's news. Unlike the morning brief, do NOT apply cross-day dedup —
+    # the wrap needs to see what the morning covered in order to reconcile it.
+    raw_items = _fetch_brief_sources(cfg.polygon_api_key, held)
+    seen, items = set(), []
+    for item in raw_items:
+        h = content_hash(item.get("title", ""), item.get("body", ""))
+        if h not in seen:
+            seen.add(h)
+            items.append(item)
+    LOG.info("EOD: %d unique items; %d holdings", len(items), len(held))
+
+    morning = _load_brief(_today_et())
+    if morning is None:
+        LOG.info("EOD: no morning brief found for today; wrap will run without the scorecard")
+
+    wrap = generate_eod_wrap(
+        items,
+        cfg.anthropic_api_key,
+        cfg.brief_model,
+        portfolio_json=json.dumps(portfolio, indent=2),
+        market_data=market,
+        morning_brief=morning,
+    )
+    if wrap is None:
+        LOG.error("EOD wrap generation failed; nothing sent")
+        return 1
+
+    wrap["as_of"] = _today_et()
+    ok = email_brief.send_eod_wrap(
+        wrap, cfg.smtp_host, cfg.smtp_port, cfg.smtp_user, cfg.smtp_password,
+        cfg.digest_to_email, market=market,
     )
     return 0 if ok else 1
 
@@ -291,12 +403,13 @@ def _save_run_output(triage: Dict[str, Any]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Layer-0 news triage service")
-    parser.add_argument("command", choices=["triage", "brief", "digest", "test", "test-email"])
+    parser.add_argument("command", choices=["triage", "brief", "eod", "digest", "test", "test-email"])
     args = parser.parse_args()
 
     return {
         "triage": cmd_triage,
         "brief": cmd_brief,
+        "eod": cmd_eod,
         "digest": cmd_digest,
         "test": cmd_test,
         "test-email": cmd_test_email,

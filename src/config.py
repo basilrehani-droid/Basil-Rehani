@@ -128,6 +128,21 @@ CATALYST_FEEDS = [
      "url": "https://www.fda.gov/about-fda/contact-fda/stay-informed/rss-feeds/press-releases/rss.xml"},
 ]
 
+# US market (NYSE/Nasdaq) full-day closures. Used to annotate briefs on holidays —
+# the cron runs Mon-Fri regardless, so this flags a closed-market day. Extend yearly.
+MARKET_HOLIDAYS = {
+    "2026-01-01": "New Year's Day",
+    "2026-01-19": "Martin Luther King Jr. Day",
+    "2026-02-16": "Presidents' Day",
+    "2026-04-03": "Good Friday",
+    "2026-05-25": "Memorial Day",
+    "2026-06-19": "Juneteenth",
+    "2026-07-03": "Independence Day (observed)",
+    "2026-09-07": "Labor Day",
+    "2026-11-26": "Thanksgiving",
+    "2026-12-25": "Christmas",
+}
+
 # Ticker -> company name, used to make per-stock Google News queries precise
 # (e.g. "ServiceNow" instead of the ambiguous "NOW"). Tickers not listed fall back
 # to the raw symbol. Add a line when you take a new position. Schwab doesn't return

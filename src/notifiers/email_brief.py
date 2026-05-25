@@ -25,6 +25,15 @@ SECTIONS: List[tuple[str, str]] = [
     ("also_relevant", "Also Relevant"),
 ]
 
+# Evening wrap uses the same machinery with different sections + title.
+EOD_SECTIONS: List[tuple[str, str]] = [
+    ("market_recap", "Market Recap"),
+    ("portfolio", "Your Portfolio Today"),
+    ("played_out", "How the Morning Calls Played Out"),
+    ("tomorrow_watch", "What to Watch Tomorrow"),
+    ("also_relevant", "Also Relevant"),
+]
+
 
 def _md_to_html(text: str) -> str:
     return md.markdown(text or "", extensions=["extra", "sane_lists", "nl2br"])
@@ -37,6 +46,7 @@ def send_brief(
     smtp_user: str,
     smtp_password: str,
     to_email: str,
+    market: Dict[str, Any] | None = None,
 ) -> bool:
     """Render and send the morning brief. Returns True if delivered."""
     if not (smtp_user and smtp_password and to_email):
@@ -46,8 +56,8 @@ def send_brief(
     date = brief.get("as_of") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     takeaways = [t for t in (brief.get("headline_takeaways") or []) if t.strip()]
 
-    html = _render_html(brief, date, takeaways)
-    text = _render_text(brief, date, takeaways)
+    html = _render_html(brief, date, takeaways, market)
+    text = _render_text(brief, date, takeaways, market)
 
     msg = MIMEMultipart("alternative")
     n = len(takeaways)
@@ -127,13 +137,31 @@ def send_test_email(
     return True
 
 
-def _render_text(brief: Dict[str, Any], date: str, takeaways: List[str]) -> str:
-    lines = [f"MORNING BRIEF — {date}", "=" * 50, ""]
+def _market_text(market: Dict[str, Any] | None) -> List[str]:
+    if not market:
+        return []
+    lines = []
+    if market.get("note"):
+        lines.append(f"  ⚠ {market['note']}")
+    for r in market.get("macro") or []:
+        chg = f"{r['pct']:+.2f}%" if r.get("unit") == "pct" else f"{r['change']:+.2f}"
+        lines.append(f"  {r['name']}: {r['price']} ({chg})")
+    for h in market.get("holdings") or []:
+        basis = f", {h['pct_from_basis']:+.1f}% vs basis" if "pct_from_basis" in h else ""
+        lines.append(f"  {h['ticker']}: {h['price']} ({h['pct']:+.2f}%){basis}")
+    return ["MARKET SNAPSHOT", "-" * 15, *lines, ""] if lines else []
+
+
+def _render_text(brief: Dict[str, Any], date: str, takeaways: List[str],
+                 market: Dict[str, Any] | None = None,
+                 sections: List[tuple[str, str]] = SECTIONS, title: str = "MORNING BRIEF") -> str:
+    lines = [f"{title} — {date}", "=" * 50, ""]
     if takeaways:
         lines.append("TAKEAWAYS")
         lines += [f"  • {t}" for t in takeaways]
         lines.append("")
-    for key, heading in SECTIONS:
+    lines += _market_text(market)
+    for key, heading in sections:
         body = (brief.get(key) or "").strip()
         if not body:
             continue
@@ -145,7 +173,46 @@ def _render_text(brief: Dict[str, Any], date: str, takeaways: List[str]) -> str:
     return "\n".join(lines)
 
 
-def _render_html(brief: Dict[str, Any], date: str, takeaways: List[str]) -> str:
+def _market_html(market: Dict[str, Any] | None) -> str:
+    if not market:
+        return ""
+
+    def cell(pct: float) -> str:
+        color = "#16a34a" if pct >= 0 else "#dc2626"
+        return f'<span style="color:{color};font-weight:600">{pct:+.2f}%</span>'
+
+    chips = []
+    for r in market.get("macro") or []:
+        val = cell(r["pct"]) if r.get("unit") == "pct" else (
+            f'<span style="color:{"#16a34a" if r["change"]>=0 else "#dc2626"};font-weight:600">{r["change"]:+.2f}</span>')
+        chips.append(f'<td style="padding:4px 12px 4px 0;white-space:nowrap">'
+                     f'<span style="color:#666">{_escape(r["name"])}</span> {r["price"]} {val}</td>')
+    macro_row = ("<table style='border-collapse:collapse;font-size:13px;margin:0 0 10px'><tr>"
+                 + "".join(chips) + "</tr></table>") if chips else ""
+
+    hrows = []
+    for h in market.get("holdings") or []:
+        basis = (f'<span style="color:#888">{h["pct_from_basis"]:+.1f}% vs basis</span>'
+                 if "pct_from_basis" in h else "")
+        hrows.append(f'<tr><td style="padding:2px 14px 2px 0;font-weight:600">{_escape(h["ticker"])}</td>'
+                     f'<td style="padding:2px 14px 2px 0">{h["price"]}</td>'
+                     f'<td style="padding:2px 14px 2px 0">{cell(h["pct"])}</td>'
+                     f'<td style="padding:2px 0">{basis}</td></tr>')
+    holdings_tbl = ("<table style='border-collapse:collapse;font-size:13px'>" + "".join(hrows) + "</table>") if hrows else ""
+
+    note = market.get("note")
+    note_html = (f'<div style="background:#fef3c7;border-radius:6px;padding:6px 12px;margin:0 0 10px;'
+                 f'font-size:13px;color:#92400e">⚠ {_escape(note)}</div>' if note else "")
+    if not (macro_row or holdings_tbl or note_html):
+        return ""
+    return (f'<section style="margin:0 0 22px"><h3 style="margin:0 0 8px;color:#111;'
+            f'border-bottom:1px solid #e5e7eb;padding-bottom:4px">Market Snapshot</h3>'
+            f'{note_html}{macro_row}{holdings_tbl}</section>')
+
+
+def _render_html(brief: Dict[str, Any], date: str, takeaways: List[str],
+                 market: Dict[str, Any] | None = None,
+                 sections: List[tuple[str, str]] = SECTIONS, title: str = "☀️ Morning Brief") -> str:
     blocks: List[str] = []
 
     if takeaways:
@@ -156,7 +223,9 @@ def _render_html(brief: Dict[str, Any], date: str, takeaways: List[str]) -> str:
   <ul style="margin:0;padding-left:20px;line-height:1.6">{items}</ul>
 </div>""")
 
-    for key, heading in SECTIONS:
+    blocks.append(_market_html(market))
+
+    for key, heading in sections:
         body = (brief.get(key) or "").strip()
         if not body:
             continue
@@ -168,13 +237,53 @@ def _render_html(brief: Dict[str, Any], date: str, takeaways: List[str]) -> str:
 
     return f"""
 <html><body style="font-family:-apple-system,Segoe UI,sans-serif;color:#222;max-width:680px;margin:0 auto;padding:8px 16px">
-<h2 style="margin:0 0 4px">☀️ Morning Brief</h2>
+<h2 style="margin:0 0 4px">{title}</h2>
 <p style="color:#666;margin:0 0 20px">{date}</p>
 {"".join(blocks)}
 <p style="color:#9ca3af;font-size:12px;margin-top:28px;border-top:1px solid #eee;padding-top:10px">
-Generated by your news-triage service · four-layer framework · model-synthesized from overnight news + live portfolio.
+Generated by your news-triage service · four-layer framework · model-synthesized from market data + news + live portfolio.
 </p>
 </body></html>"""
+
+
+def send_eod_wrap(
+    wrap: Dict[str, Any],
+    smtp_host: str,
+    smtp_port: int,
+    smtp_user: str,
+    smtp_password: str,
+    to_email: str,
+    market: Dict[str, Any] | None = None,
+) -> bool:
+    """Render and send the evening wrap — same machinery, EOD sections + title."""
+    if not (smtp_user and smtp_password and to_email):
+        LOG.warning("Email credentials missing; cannot send evening wrap")
+        return False
+
+    date = wrap.get("as_of") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    takeaways = [t for t in (wrap.get("headline_takeaways") or []) if t.strip()]
+
+    html = _render_html(wrap, date, takeaways, market, EOD_SECTIONS, "🌙 Evening Wrap")
+    text = _render_text(wrap, date, takeaways, market, EOD_SECTIONS, "EVENING WRAP")
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"🌙 Evening Wrap · {date}"
+    msg["From"] = smtp_user
+    msg["To"] = to_email
+    msg.attach(MIMEText(text, "plain"))
+    msg.attach(MIMEText(html, "html"))
+
+    try:
+        with smtplib.SMTP(smtp_host, smtp_port) as s:
+            s.starttls()
+            s.login(smtp_user, smtp_password)
+            s.sendmail(smtp_user, [to_email], msg.as_string())
+    except Exception as e:
+        LOG.error("Failed to send evening wrap: %s", e)
+        return False
+
+    LOG.info("Sent evening wrap for %s", date)
+    return True
 
 
 def _escape(s: str) -> str:
